@@ -18,7 +18,7 @@ cd steenberg-stocktake
 ```bash
 cp .env.local.example .env.local
 ```
-Then edit `.env.local` and replace `your_api_key_here` with your key from https://console.anthropic.com
+Then edit `.env.local` and paste your Anthropic API key as the value for `ANTHROPIC_API_KEY` (see https://console.anthropic.com).
 
 **4. Run locally**
 ```bash
