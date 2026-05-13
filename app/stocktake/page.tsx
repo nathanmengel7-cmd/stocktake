@@ -1,32 +1,14 @@
 'use client'
 
-import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
-
-const SYSTEM_PROMPT = `You are a stocktaking assistant for Steenberg Veterinary Clinic, a retail vet shop. Analyse the shelf photo and produce an accurate inventory count for stock management purposes. Be practical, precise, and consistent.
-
-STEP 1 – SCAN BEFORE YOU COUNT
-Mentally scan the entire image left to right, shelf by shelf. Catalogue every visually distinct product grouping. Do not count until you have identified everything.
-
-STEP 2 – PRODUCT IDENTIFICATION RULES
-- Do not skip partially labelled products. List any distinct item separately using shape, colour, size, or visible text.
-- Differentiate by label colour. Red label vs blue label = two separate products, always.
-- BRAND (FOR FILTERING): Include a separate field "brand": the manufacturer or brand name visible on the pack (e.g. Royal Canin, Hill's). Use "product_name" for the specific product line, variant, or flavour text on the pack. brand must be separate from size — always output both fields.
-- If the brand cannot be read or inferred, set brand to exactly: unknown (lowercase).
-- CRITICAL: Differentiate by physical can/container size. A small can and a large can of the same product are TWO separate line items, always — even if brand and flavour are identical.
-- To determine size: compare cans/containers relative to each other in the image. Note any weight or volume text visible on labels (e.g. "156g", "400g", "14oz"). If size text is not legible, use relative visual size (Small, Medium, Large) based on comparison with other items in the shot.
-- Do not group distinct products even if branding is unreadable.
-- Unreadable brand names on the pack (for product_name): write "Unknown – [describe packaging]".
-- One row per shelf location if the same product appears on multiple shelves.
-
-STEP 3 – COUNTING
-Count individual units visible. Estimate depth (units behind front row) only if clearly implied by shelf depth. State your basis if estimating.
-
-OUTPUT FORMAT
-Return ONLY a valid JSON object, no preamble, no markdown fences. Structure:
-{"items":[{"product_name":"string","brand":"string","size":"string (weight/volume from label if legible, else Small/Medium/Large relative to other items in image)","count":number,"category":"string","description":"string","confidence":"High"|"Medium"|"Low","shelf":"string"}],"flags":["string"]}
-
-Confidence: High = clearly legible and countable. Medium = partially visible or estimated depth. Low = unreadable label or heavily obstructed.
-Flags: list anything inferred, unclear, partially hidden, or requiring manual verification. If nothing to flag, return an empty array.`
+import { useState, useCallback, useMemo, useEffect, useLayoutEffect, useRef } from 'react'
+import {
+  type ScanMode,
+  SCAN_MODES,
+  SCAN_MODE_LABELS,
+  SCAN_MODE_STORAGE_KEY,
+  isScanMode,
+  buildClaudeRequestParts,
+} from '@/lib/stocktake-prompts'
 
 type Confidence = 'High' | 'Medium' | 'Low'
 
@@ -84,6 +66,7 @@ interface PhotoSession {
   source: string
   flags: string[]
   approved: boolean
+  scanMode: ScanMode
 }
 
 function photoSectionDomId(queueId: string) {
@@ -128,6 +111,25 @@ export default function StocktakePage() {
     }
   }, [lightbox])
 
+  const [scanMode, setScanMode] = useState<ScanMode>('general')
+
+  useLayoutEffect(() => {
+    try {
+      const raw = localStorage.getItem(SCAN_MODE_STORAGE_KEY)
+      if (isScanMode(raw)) setScanMode(raw)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SCAN_MODE_STORAGE_KEY, scanMode)
+    } catch {
+      /* ignore */
+    }
+  }, [scanMode])
+
   const sessionsRef = useRef(sessions)
   useEffect(() => {
     sessionsRef.current = sessions
@@ -152,25 +154,27 @@ export default function StocktakePage() {
     const pending = queue.filter(q => q.status === 'pending')
     if (!pending.length) return
     setRunning(true)
+    const modeSnapshot = scanMode
 
     for (const qi of pending) {
       setQueue(prev => prev.map(q => q.id === qi.id ? { ...q, status: 'scanning' } : q))
       try {
         const b64 = await fileToBase64(qi.file)
         const mime = qi.file.type || 'image/jpeg'
+        const { system, userText, max_tokens } = buildClaudeRequestParts(modeSnapshot)
 
         const res = await fetch('/api/claude', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: 'claude-sonnet-4-20250514',
-            max_tokens: 1000,
-            system: SYSTEM_PROMPT,
+            max_tokens,
+            system,
             messages: [{
               role: 'user',
               content: [
                 { type: 'image', source: { type: 'base64', media_type: mime, data: b64 } },
-                { type: 'text', text: 'Analyse this shelf photo and return the JSON inventory count.' }
+                { type: 'text', text: userText }
               ]
             }]
           })
@@ -206,6 +210,7 @@ export default function StocktakePage() {
           source: qi.file.name,
           flags: photoFlags,
           approved: false,
+          scanMode: modeSnapshot,
         }])
         setBodyExpandedByQueueId(prev => ({ ...prev, [qi.id]: true }))
         setItems(prev => [...prev, ...(parsed.items || []).map((i: Partial<StockItem>) => {
@@ -290,6 +295,29 @@ export default function StocktakePage() {
     if (qid) invalidateSessionApproval(qid)
   }
 
+  function addManualRow(queueId: string) {
+    const session = sessions.find(s => s.queueId === queueId)
+    const q = queue.find(x => x.id === queueId)
+    const sourceName = session?.source ?? q?.file.name ?? ''
+    setItems(prev => [
+      ...prev,
+      {
+        product_name: '',
+        brand: 'unknown',
+        size: '',
+        count: 1,
+        category: '',
+        description: 'Added manually',
+        confidence: 'Low',
+        shelf: '',
+        source: sourceName,
+        queueId,
+      },
+    ])
+    invalidateSessionApproval(queueId)
+    setBodyExpandedByQueueId(prev => ({ ...prev, [queueId]: true }))
+  }
+
   /** Remove one photo from the queue and all inventory rows / session tied to it. */
   function removePhotoAndData(queueId: string) {
     const qEntry = queue.find(q => q.id === queueId)
@@ -315,11 +343,13 @@ export default function StocktakePage() {
   }
 
   function exportDraftCSV() {
-    const headers = ['Product name', 'Brand', 'Size', 'Count', 'Category', 'Description', 'Shelf', 'Confidence', 'Source photo']
-    const rows = items.map(i =>
-      [i.product_name, i.brand || 'unknown', i.size || '', i.count, i.category, i.description, i.shelf || '', i.confidence || '', i.source || '']
+    const headers = ['Product name', 'Brand', 'Size', 'Count', 'Category', 'Description', 'Shelf', 'Confidence', 'Source photo', 'Scan mode']
+    const rows = items.map(i => {
+      const session = sessions.find(s => s.queueId === i.queueId)
+      const modeLabel = session ? SCAN_MODE_LABELS[session.scanMode] : ''
+      return [i.product_name, i.brand || 'unknown', i.size || '', i.count, i.category, i.description, i.shelf || '', i.confidence || '', i.source || '', modeLabel]
         .map(v => `"${String(v).replace(/"/g, '""')}"`)
-    )
+    })
     const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const a = document.createElement('a')
@@ -331,11 +361,13 @@ export default function StocktakePage() {
   function exportConfirmedCSV() {
     const approvedIds = new Set(sessions.filter(s => s.approved).map(s => s.queueId))
     const rowsData = items.filter(i => approvedIds.has(i.queueId))
-    const headers = ['Product name', 'Brand', 'Size', 'Count', 'Category', 'Description', 'Shelf', 'Confidence', 'Source photo', 'Confirmed']
-    const rows = rowsData.map(i =>
-      [i.product_name, i.brand || 'unknown', i.size || '', i.count, i.category, i.description, i.shelf || '', i.confidence || '', i.source || '', 'yes']
+    const headers = ['Product name', 'Brand', 'Size', 'Count', 'Category', 'Description', 'Shelf', 'Confidence', 'Source photo', 'Confirmed', 'Scan mode']
+    const rows = rowsData.map(i => {
+      const session = sessions.find(s => s.queueId === i.queueId)
+      const modeLabel = session ? SCAN_MODE_LABELS[session.scanMode] : ''
+      return [i.product_name, i.brand || 'unknown', i.size || '', i.count, i.category, i.description, i.shelf || '', i.confidence || '', i.source || '', 'yes', modeLabel]
         .map(v => `"${String(v).replace(/"/g, '""')}"`)
-    )
+    })
     const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const a = document.createElement('a')
@@ -473,6 +505,28 @@ export default function StocktakePage() {
           </div>
         )}
 
+        {queue.length > 0 && (
+          <div className="mb-4 rounded-xl border border-gray-100 bg-white px-4 py-3">
+            <label htmlFor="scan-mode" className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">
+              Scan mode
+            </label>
+            <select
+              id="scan-mode"
+              value={scanMode}
+              disabled={running}
+              onChange={e => setScanMode(e.target.value as ScanMode)}
+              className="w-full sm:max-w-md text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {SCAN_MODES.map(m => (
+                <option key={m} value={m}>{SCAN_MODE_LABELS[m]}</option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-400 mt-2">
+              Each pending photo in this run uses the mode selected when you click Analyse photos. Change mode between runs for different product types.
+            </p>
+          </div>
+        )}
+
         {/* Analyse button */}
         <button
           onClick={runAnalysis}
@@ -599,6 +653,9 @@ export default function StocktakePage() {
                         <p className="text-xs text-gray-500 mt-0.5">
                           {rowCount} line{rowCount === 1 ? '' : 's'}
                           {session.flags.length > 0 ? ` · ${session.flags.length} flag${session.flags.length === 1 ? '' : 's'}` : ''}
+                          {' · '}
+                          <span className="text-gray-600">Scan:</span>{' '}
+                          <span className="font-medium text-gray-700">{SCAN_MODE_LABELS[session.scanMode]}</span>
                         </p>
                       </div>
                       <span className={`flex-shrink-0 text-xs px-2 py-0.5 rounded-full ${session.approved ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-900'}`}>
@@ -624,6 +681,15 @@ export default function StocktakePage() {
                       <button
                         type="button"
                         disabled={running}
+                        onClick={() => addManualRow(session.queueId)}
+                        className="flex-shrink-0 text-xs font-medium border border-gray-200 rounded-lg px-2.5 py-1.5 hover:bg-white text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                        title="Add a manual line if the scan missed an item"
+                      >
+                        Add row
+                      </button>
+                      <button
+                        type="button"
+                        disabled={running}
                         onClick={() => removePhotoAndData(session.queueId)}
                         className="flex-shrink-0 text-xs text-red-600 hover:bg-red-50 rounded-lg px-2.5 py-1.5 border border-red-100 disabled:opacity-40 disabled:cursor-not-allowed"
                         title="Remove this photo from the queue and delete all lines for it"
@@ -635,9 +701,19 @@ export default function StocktakePage() {
                     {expanded && (
                       <div id={panelId} className="border-t border-gray-50">
                         {rowCount === 0 && (
-                          <p className="text-sm text-gray-500 px-4 py-3 bg-white">
-                            No line items detected for this photo. Approve if the shelf is empty or the scan missed stock; otherwise edit the queue and re-run analysis.
-                          </p>
+                          <div className="px-4 py-3 bg-white space-y-3">
+                            <p className="text-sm text-gray-500">
+                              No line items detected for this photo. Approve if the shelf is empty or the scan missed stock; otherwise edit the queue and re-run analysis.
+                            </p>
+                            <button
+                              type="button"
+                              disabled={running}
+                              onClick={() => addManualRow(session.queueId)}
+                              className="text-sm font-medium border border-gray-200 rounded-lg px-3 py-2 bg-white text-gray-800 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                            >
+                              + Add row
+                            </button>
+                          </div>
                         )}
                         {rowCount > 0 && (
                           <div className="overflow-x-auto">
@@ -683,6 +759,16 @@ export default function StocktakePage() {
                                 })}
                               </tbody>
                             </table>
+                            <div className="flex items-center px-3 py-2 border-t border-gray-100 bg-gray-50/50">
+                              <button
+                                type="button"
+                                disabled={running}
+                                onClick={() => addManualRow(session.queueId)}
+                                className="text-sm font-medium border border-gray-200 rounded-lg px-3 py-2 bg-white text-gray-800 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                              >
+                                + Add row
+                              </button>
+                            </div>
                           </div>
                         )}
                         {session.flags.length > 0 && (

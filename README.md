@@ -49,15 +49,25 @@ Your app will be live at `https://steenberg-stocktake.vercel.app/stocktake`
 ## Usage
 
 1. Upload one or more shelf photos (drag & drop or click)
-2. Click **Analyse photos**
-3. Review and edit the results table inline
-4. Click **Export CSV** to download for Lupa import
+2. Choose **Scan mode** (general, dry bags, canned, or pills) so the analyser uses instructions matched to what you are photographing
+3. Click **Analyse photos**
+4. Review and edit the results table inline; each photo card shows which scan mode was used for that image
+5. Click **Export CSV** to download for Lupa import
+
+### Scan modes
+
+- **General / mixed shelves** — default rules for mixed stock
+- **Dry food (bags)** — emphasises separate vertical tiers, pack weights, flavours, and life-stage (puppy/adult/senior)
+- **Canned / wet food** — emphasises flavour text, can sizes, and conservative depth with flags when a second row is unclear
+- **Pills / small items** — tray counts only; does not use the bottle’s printed quantity as the tray count
+
+Your last selected mode is remembered in the browser for the next visit.
 
 ---
 
 ## Notes
 
-- CSV exports include **Brand** and **Size** columns (after Product name) for filtering and Lupa import
+- CSV exports include **Brand**, **Size**, and **Scan mode** columns (after Product name) for filtering and Lupa import
 - Each photo is analysed independently; results accumulate in one table per session
 - The Confidence column flags items to double-check (Low = verify manually)
 - Flags section lists anything the model was uncertain about
