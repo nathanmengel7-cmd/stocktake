@@ -10,10 +10,12 @@ Mentally scan the entire image left to right, shelf by shelf. Catalogue every vi
 STEP 2 – PRODUCT IDENTIFICATION RULES
 - Do not skip partially labelled products. List any distinct item separately using shape, colour, size, or visible text.
 - Differentiate by label colour. Red label vs blue label = two separate products, always.
+- BRAND (FOR FILTERING): Include a separate field "brand": the manufacturer or brand name visible on the pack (e.g. Royal Canin, Hill's). Use "product_name" for the specific product line, variant, or flavour text on the pack. brand must be separate from size — always output both fields.
+- If the brand cannot be read or inferred, set brand to exactly: unknown (lowercase).
 - CRITICAL: Differentiate by physical can/container size. A small can and a large can of the same product are TWO separate line items, always — even if brand and flavour are identical.
 - To determine size: compare cans/containers relative to each other in the image. Note any weight or volume text visible on labels (e.g. "156g", "400g", "14oz"). If size text is not legible, use relative visual size (Small, Medium, Large) based on comparison with other items in the shot.
 - Do not group distinct products even if branding is unreadable.
-- Unreadable brand names: write "Unknown – [describe packaging]".
+- Unreadable brand names on the pack (for product_name): write "Unknown – [describe packaging]".
 - One row per shelf location if the same product appears on multiple shelves.
 
 STEP 3 – COUNTING
@@ -21,7 +23,7 @@ Count individual units visible. Estimate depth (units behind front row) only if 
 
 OUTPUT FORMAT
 Return ONLY a valid JSON object, no preamble, no markdown fences. Structure:
-{"items":[{"product_name":"string","size":"string (weight/volume from label if legible, else Small/Medium/Large relative to other items in image)","count":number,"category":"string","description":"string","confidence":"High"|"Medium"|"Low","shelf":"string"}],"flags":["string"]}
+{"items":[{"product_name":"string","brand":"string","size":"string (weight/volume from label if legible, else Small/Medium/Large relative to other items in image)","count":number,"category":"string","description":"string","confidence":"High"|"Medium"|"Low","shelf":"string"}],"flags":["string"]}
 
 Confidence: High = clearly legible and countable. Medium = partially visible or estimated depth. Low = unreadable label or heavily obstructed.
 Flags: list anything inferred, unclear, partially hidden, or requiring manual verification. If nothing to flag, return an empty array.`
@@ -30,6 +32,8 @@ type Confidence = 'High' | 'Medium' | 'Low'
 
 interface StockItem {
   product_name: string
+  /** Manufacturer or brand visible on the pack; use unknown if unreadable. */
+  brand: string
   /** Weight/volume from label if legible, else Small/Medium/Large vs other items in the shot. */
   size: string
   count: number
@@ -204,11 +208,10 @@ export default function StocktakePage() {
           approved: false,
         }])
         setBodyExpandedByQueueId(prev => ({ ...prev, [qi.id]: true }))
-        setItems(prev => [...prev, ...(parsed.items || []).map((i: Partial<StockItem> & { brand?: string }) => {
-          const fromSize = typeof i.size === 'string' ? i.size.trim() : ''
-          const fromLegacyBrand = typeof i.brand === 'string' ? i.brand.trim() : ''
-          const sz = fromSize || fromLegacyBrand
-          return { ...i, size: sz, source: qi.file.name, queueId: qi.id } as StockItem
+        setItems(prev => [...prev, ...(parsed.items || []).map((i: Partial<StockItem>) => {
+          const b = typeof i.brand === 'string' ? i.brand.trim() : ''
+          const sz = typeof i.size === 'string' ? i.size.trim() : ''
+          return { ...i, brand: b || 'unknown', size: sz, source: qi.file.name, queueId: qi.id } as StockItem
         })])
       } catch (e) {
         console.error(e)
@@ -312,9 +315,9 @@ export default function StocktakePage() {
   }
 
   function exportDraftCSV() {
-    const headers = ['Product name', 'Size', 'Count', 'Category', 'Description', 'Shelf', 'Confidence', 'Source photo']
+    const headers = ['Product name', 'Brand', 'Size', 'Count', 'Category', 'Description', 'Shelf', 'Confidence', 'Source photo']
     const rows = items.map(i =>
-      [i.product_name, i.size || '', i.count, i.category, i.description, i.shelf || '', i.confidence || '', i.source || '']
+      [i.product_name, i.brand || 'unknown', i.size || '', i.count, i.category, i.description, i.shelf || '', i.confidence || '', i.source || '']
         .map(v => `"${String(v).replace(/"/g, '""')}"`)
     )
     const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
@@ -328,9 +331,9 @@ export default function StocktakePage() {
   function exportConfirmedCSV() {
     const approvedIds = new Set(sessions.filter(s => s.approved).map(s => s.queueId))
     const rowsData = items.filter(i => approvedIds.has(i.queueId))
-    const headers = ['Product name', 'Size', 'Count', 'Category', 'Description', 'Shelf', 'Confidence', 'Source photo', 'Confirmed']
+    const headers = ['Product name', 'Brand', 'Size', 'Count', 'Category', 'Description', 'Shelf', 'Confidence', 'Source photo', 'Confirmed']
     const rows = rowsData.map(i =>
-      [i.product_name, i.size || '', i.count, i.category, i.description, i.shelf || '', i.confidence || '', i.source || '', 'yes']
+      [i.product_name, i.brand || 'unknown', i.size || '', i.count, i.category, i.description, i.shelf || '', i.confidence || '', i.source || '', 'yes']
         .map(v => `"${String(v).replace(/"/g, '""')}"`)
     )
     const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
@@ -638,16 +641,17 @@ export default function StocktakePage() {
                         )}
                         {rowCount > 0 && (
                           <div className="overflow-x-auto">
-                            <table className="w-full text-sm min-w-[700px]">
+                            <table className="w-full text-sm min-w-[800px]">
                               <thead>
                                 <tr className="bg-gray-50 text-xs text-gray-400 font-medium">
-                                  <th className="text-left px-3 py-2.5 w-[20%]">Product name</th>
-                                  <th className="text-left px-3 py-2.5 w-[11%]">Size</th>
+                                  <th className="text-left px-3 py-2.5 w-[17%]">Product name</th>
+                                  <th className="text-left px-3 py-2.5 w-[10%]">Brand</th>
+                                  <th className="text-left px-3 py-2.5 w-[10%]">Size</th>
                                   <th className="text-left px-3 py-2.5 w-[7%]">Count</th>
-                                  <th className="text-left px-3 py-2.5 w-[10%]">Category</th>
-                                  <th className="text-left px-3 py-2.5 w-[22%]">Description</th>
-                                  <th className="text-left px-3 py-2.5 w-[8%]">Shelf</th>
-                                  <th className="text-left px-3 py-2.5 w-[12%]">Confidence</th>
+                                  <th className="text-left px-3 py-2.5 w-[9%]">Category</th>
+                                  <th className="text-left px-3 py-2.5 w-[19%]">Description</th>
+                                  <th className="text-left px-3 py-2.5 w-[7%]">Shelf</th>
+                                  <th className="text-left px-3 py-2.5 w-[11%]">Confidence</th>
                                   <th className="text-right px-3 py-2.5 w-20 whitespace-nowrap" scope="col"><span className="sr-only">Row actions</span></th>
                                 </tr>
                               </thead>
@@ -657,6 +661,7 @@ export default function StocktakePage() {
                                   return (
                                     <tr key={flatIdx} className="border-t border-gray-50 hover:bg-gray-50/50">
                                       <td className="px-3 py-2"><input className="w-full bg-transparent text-gray-800 text-sm focus:outline-none" value={esc(item.product_name)} onChange={e => updateItem(flatIdx, 'product_name', e.target.value)} /></td>
+                                      <td className="px-3 py-2"><input className="w-full bg-transparent text-gray-800 text-sm focus:outline-none" value={esc(item.brand || 'unknown')} onChange={e => updateItem(flatIdx, 'brand', e.target.value)} /></td>
                                       <td className="px-3 py-2"><input className="w-full bg-transparent text-gray-800 text-sm focus:outline-none" value={esc(item.size)} onChange={e => updateItem(flatIdx, 'size', e.target.value)} /></td>
                                       <td className="px-3 py-2"><input type="number" className="w-12 bg-transparent text-gray-800 text-sm focus:outline-none" value={item.count} onChange={e => updateItem(flatIdx, 'count', Number(e.target.value))} /></td>
                                       <td className="px-3 py-2"><input className="w-full bg-transparent text-gray-800 text-sm focus:outline-none" value={esc(item.category)} onChange={e => updateItem(flatIdx, 'category', e.target.value)} /></td>

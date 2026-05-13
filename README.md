@@ -57,6 +57,7 @@ Your app will be live at `https://steenberg-stocktake.vercel.app/stocktake`
 
 ## Notes
 
+- CSV exports include **Brand** and **Size** columns (after Product name) for filtering and Lupa import
 - Each photo is analysed independently; results accumulate in one table per session
 - The Confidence column flags items to double-check (Low = verify manually)
 - Flags section lists anything the model was uncertain about
