@@ -172,8 +172,26 @@ export default function StocktakePage() {
           })
         })
 
-        const data = await res.json()
-        const text = data.content?.find((b: { type: string }) => b.type === 'text')?.text || ''
+        const rawBody = await res.text()
+
+        let data: Record<string, unknown>
+        try {
+          data = rawBody.trim() ? (JSON.parse(rawBody) as Record<string, unknown>) : {}
+        } catch {
+          throw new Error(`/api/claude returned non-JSON (HTTP ${res.status}).`)
+        }
+
+        if (!res.ok) {
+          const errObj = data.error as { message?: string } | undefined
+          const msg =
+            (typeof data.error === 'string' ? data.error : errObj?.message) ||
+            (typeof data.message === 'string' ? data.message : null) ||
+            `Stocktake API error (HTTP ${res.status})`
+          throw new Error(msg)
+        }
+
+        const content = data.content as Array<{ type: string; text?: string }> | undefined
+        const text = content?.find(b => b.type === 'text')?.text || ''
         const clean = text.replace(/```json|```/g, '').trim()
         const parsed = JSON.parse(clean)
         const photoFlags = (parsed.flags || []).filter(Boolean) as string[]
