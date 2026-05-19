@@ -58,7 +58,7 @@ Your app will be live at `https://steenberg-stocktake.vercel.app/stocktake`
 
 - **General / mixed shelves** — default rules for mixed stock
 - **Dry food (bags)** — emphasises separate vertical tiers, pack weights, flavours, and life-stage (puppy/adult/senior)
-- **Canned / wet food** — grid counting (height × depth) for uniform stacks, exact product-line labels, and flags for irregular or edge stacks
+- **Canned / wet food** — grid counting (height × depth, max depth 4) for uniform stacks, exact product-line labels, and flags for irregular or edge stacks
 - **Pills / small items** — tray counts only; does not use the bottle’s printed quantity as the tray count
 
 Your last selected mode is remembered in the browser for the next visit.

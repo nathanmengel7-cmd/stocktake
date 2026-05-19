@@ -58,19 +58,22 @@ dry_bags: `MODE-SPECIFIC (DRY BAGS)
 - FLAVOUR: Different flavours (e.g. Chicken vs Lamb vs Rice) = different rows always.
 - Use the description or shelf field to note position (e.g. bottom tier, upper stack) to help staff reconcile against the photo.`,
 canned: `MODE-SPECIFIC (CANNED / WET)
-- Apply BASE STEP 3 depth rule; canned mode adds grid multiplication when stacks are uniform.
+- Do NOT use BASE STEP 3 additive depth (+1 per rear unit). For canned mode use grid multiplication only (H × D).
 - PRODUCT ID: Read the main product line on the label band (e.g. ON-CARE, GASTROINTESTINAL BIOME, URINARY CARE c/d) and put it in product_name. Do not substitute a different line (e.g. do not write "Science Diet Adult" when the label says Prescription Diet On-Care). Different label colour bands or line names = separate rows even if brand is the same (e.g. Hill's).
 - Read the smallest legible text bands for flavour and variant; chicken vs lamb (or similar) must be separate line items whenever the text or consistent colour band differs.
 - Compare can height and diameter to neighbours and to label grams/oz/ml. Do not merge different sizes.
 - Partial columns at the frame edge: output a separate row only if enough label text is visible to name the SKU; otherwise flag "partial stack at edge".
+- MAXIMUM DEPTH: At Steenberg, canned stacks are never more than 4 columns deep (D ≤ 4). If visual evidence suggests D > 4, cap D at 4, set confidence to Medium, and flag "depth capped at 4 — verify manually".
 - GRID COUNTING (per uniform column/stack of identical cans):
   1. Identify each visually distinct column (same label colour band / same legible product line).
-  2. Height (H): count cans in the front-facing vertical stack for that column (top to bottom).
-  3. Depth (D): count how many full layers exist behind the front row for that column. Evidence: partially visible cans, aligned pull-tabs/lids, repeated label bands at the same height, shadows between layers. Do not require full label visibility on rear cans if lids/edges align with the front stack.
+  2. Height (H): count cans in the front-facing vertical stack for that column only (top to bottom). H is vertical — not depth.
+  3. Depth (D): count parallel columns going into the shelf for this SKU only (front column = 1, each full column behind = +1). To find D: pick one height level (e.g. middle of stack) and count how many lid/pull-tab columns line up into the shelf for this product — typically 1–4. Do not count vertical cans as depth. Do not require full label visibility on rear cans if lids/edges align with the front stack.
+  Anti-patterns (never do this): do not set D = H + anything; do not count each horizontal pull-tab row as a depth layer; do not count neighbouring SKU columns (left/right) as depth for this product; do not add front-row count to rear count and then multiply by H.
   4. Total: count = H × D for uniform rectangular stacks.
   5. Description (required): state the arithmetic (e.g. "5 high × 4 deep = 20") and position (e.g. "left column", "center stack").
   6. Confidence: High when H and D are both clearly readable; Medium if one dimension is inferred from consistent partial evidence; Low + flag when the stack is irregular.
-  7. Irregular stacks: if layers differ in height or depth, or SKUs are mixed in one column, do not use H × D — count layer-by-layer or flag for manual review.`,
+  7. Irregular stacks: if layers differ in height or depth, or SKUs are mixed in one column, do not use H × D — count layer-by-layer or flag for manual review.
+  8. Sanity check before output: if D > 4 or count > 80 for a single small-can column, re-check D using the one-height-level method; cap D at 4 per clinic rule.`,
 pills: `MODE-SPECIFIC (PILLS / SMALL ITEMS)
 - Output one line item per distinct pill/tablet type. Do not create separate line items for the container and the contents — they are one entry.
 - Product identification: read brand, name, dosage, and strength from the bottle, box, or blister pack label. Use this for product_name and description only.
@@ -83,7 +86,7 @@ const MODE_USER_LINE: Record<ScanMode, string> = {
   dry_bags:
     'Scan mode: dry food bags — separate vertical tiers, pack weights, flavours, and life-stage (puppy/adult/senior) into distinct line items; do not merge stacked sizes.',
   canned:
-    'Scan mode: canned/wet food — for each uniform can column, count height (H) and depth (D), set count = H × D, and put "H high × D deep = total" in description; read the exact Prescription Diet / product line from labels.',
+    'Scan mode: canned/wet food — D is columns into the shelf (max 4), not vertical height; use H×D only, not additive depth; put "H high × D deep = total" in description; read exact product line from labels.',
   pills:
     'Scan mode: pills/small items — count only visible discrete units in the tray; do not use the bottle label quantity as the tray count.',
 }
