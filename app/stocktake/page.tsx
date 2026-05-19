@@ -295,6 +295,22 @@ export default function StocktakePage() {
     if (qid) invalidateSessionApproval(qid)
   }
 
+  function duplicateItem(index: number) {
+    let qid: string | undefined
+    setItems(prev => {
+      const source = prev[index]
+      if (!source) return prev
+      qid = source.queueId
+      const next = [...prev]
+      next.splice(index + 1, 0, { ...source })
+      return next
+    })
+    if (qid) {
+      invalidateSessionApproval(qid)
+      setBodyExpandedByQueueId(prev => ({ ...prev, [qid!]: true }))
+    }
+  }
+
   function addManualRow(queueId: string) {
     const session = sessions.find(s => s.queueId === queueId)
     const q = queue.find(x => x.id === queueId)
@@ -728,7 +744,7 @@ export default function StocktakePage() {
                                   <th className="text-left px-3 py-2.5 w-[19%]">Description</th>
                                   <th className="text-left px-3 py-2.5 w-[7%]">Shelf</th>
                                   <th className="text-left px-3 py-2.5 w-[11%]">Confidence</th>
-                                  <th className="text-right px-3 py-2.5 w-20 whitespace-nowrap" scope="col"><span className="sr-only">Row actions</span></th>
+                                  <th className="text-right px-3 py-2.5 w-36 whitespace-nowrap" scope="col"><span className="sr-only">Row actions</span></th>
                                 </tr>
                               </thead>
                               <tbody>
@@ -745,14 +761,25 @@ export default function StocktakePage() {
                                       <td className="px-3 py-2"><input className="w-full bg-transparent text-gray-800 text-sm focus:outline-none" value={esc(item.shelf)} onChange={e => updateItem(flatIdx, 'shelf', e.target.value)} /></td>
                                       <td className="px-3 py-2"><span className={`text-xs px-2 py-0.5 rounded-full ${confClass(item.confidence)}`}>{item.confidence || '—'}</span></td>
                                       <td className="px-2 py-2 text-right align-middle">
-                                        <button
-                                          type="button"
-                                          onClick={() => removeItem(flatIdx)}
-                                          className="text-xs text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg px-2 py-1 border border-transparent hover:border-red-100 transition-colors"
-                                          aria-label="Delete this row"
-                                        >
-                                          Remove
-                                        </button>
+                                        <div className="inline-flex items-center justify-end gap-1">
+                                          <button
+                                            type="button"
+                                            onClick={() => duplicateItem(flatIdx)}
+                                            className="text-xs text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg px-2 py-1 border border-transparent hover:border-gray-200 transition-colors"
+                                            title="Copy this row so you can edit minor differences"
+                                            aria-label="Duplicate this row"
+                                          >
+                                            Duplicate
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => removeItem(flatIdx)}
+                                            className="text-xs text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg px-2 py-1 border border-transparent hover:border-red-100 transition-colors"
+                                            aria-label="Delete this row"
+                                          >
+                                            Remove
+                                          </button>
+                                        </div>
                                       </td>
                                     </tr>
                                   )

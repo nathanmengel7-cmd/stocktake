@@ -32,8 +32,11 @@ STEP 2 – PRODUCT IDENTIFICATION RULES
 - Unreadable brand names on the pack (for product_name): write "Unknown – [describe packaging]".
 - One row per shelf location if the same product appears on multiple shelves.
 
-STEP 3 – COUNTING
-Count individual units visible. Estimate depth (units behind front row) only if clearly implied by shelf depth. State your basis if estimating.
+STEP 3 – COUNTING AND DEPTH
+- Count all clearly visible front-row units first.
+- DEPTH RULE: If you can see any part of a unit behind a front-row unit — even a partial label, cap, edge, or shadow — treat it as one additional unit of the same product as the item in front, unless its label clearly differs. A partially visible unit behind a front-row unit is confirmed depth evidence; count it. Do not require full visibility to count a rear unit.
+- Set confidence to Medium when depth is estimated from partial visibility.
+- Flag only when you genuinely cannot tell if a partial shape is a separate product or the same. Do not flag routine depth that is visually consistent.
 
 OUTPUT FORMAT
 Return ONLY a valid JSON object, no preamble, no markdown fences. Structure:
@@ -43,23 +46,36 @@ Confidence: High = clearly legible and countable. Medium = partially visible or 
 Flags: list anything inferred, unclear, partially hidden, or requiring manual verification. If nothing to flag, return an empty array.`
 
 const MODE_APPENDIX: Record<ScanMode, string> = {
-  general: `MODE-SPECIFIC (GENERAL)
-- Put every legible flavour, variant, and sub-line in "product_name" (e.g. chicken vs lamb). If flavour text is partly hidden, use Medium/Low confidence and flag it — do not merge with a different flavour you are unsure about.
-- When depth is uncertain, prefer accurate visible counts plus flags over guessing hidden units.`,
+general: `MODE-SPECIFIC (GENERAL / MIXED SHELVES)
+  - Put every legible flavour, variant, and sub-line in product_name. If flavour text is partly hidden, use Medium/Low confidence and flag it — do not merge with a different flavour you are unsure about.
+  - DEPTH: Apply the base depth rule actively. Bottles, tubes, and upright containers frequently have units behind the front row. If you can see a partial unit behind (cap, shoulder, partial label), count it as +1 of the same product. Do not default to 1 unit simply because the rear unit is not fully visible.`,
 
-  dry_bags: `MODE-SPECIFIC (DRY BAGS)
-- Do not merge different vertical tiers into one line item. Bags stacked in a column (large at bottom, smaller above) are separate facings: output separate "items" rows for each distinct pack size and tier you can identify.
-- Same brand artwork with different pack weights (kg/g on label) = always separate rows. Same for different life-stage text (puppy / adult / senior) when visible — never combine into one count.
-- Different flavours (e.g. chicken vs lamb) = separate rows even when bag design looks similar.
-- Use "shelf" or "description" to note position when helpful (e.g. bottom tier, middle row, upper row) so staff can reconcile the photo.`,
-  canned: `MODE-SPECIFIC (CANNED / WET)
-- Read the smallest legible text bands on each can for flavour and variant; chicken vs lamb (or similar) must be separate line items whenever the text or consistent colour band differs.
+dry_bags: `MODE-SPECIFIC (DRY BAGS)
+- SPLITTING RULE: Treat each distinct SKU as a separate row. A SKU is uniquely defined by: brand + product line + flavour + weight/size + life stage. If any one of these differs, it is a separate row.
+- WEIGHT IS GROUND TRUTH: Never use visual bag size alone to determine if two bags are the same SKU. Always read the weight printed on the label (e.g. 3kg, 1.5kg). Two 1.5kg bags stacked together may look like one 3kg bag — they are not. If you can read different weights, they are different rows regardless of how similar they look in size.
+- CONSOLIDATION RULE: If multiple units share the same brand + flavour + weight + life stage, they are one row with count reflecting the total number of identical units. Do not give identical SKUs separate rows.
+- LIFE STAGE: If life stage text is visible (Puppy / Adult / Senior / All Life Stages), treat it as part of the SKU. Different life stages = different rows even if brand and flavour match.
+- FLAVOUR: Different flavours (e.g. Chicken vs Lamb vs Rice) = different rows always.
+- Use the description or shelf field to note position (e.g. bottom tier, upper stack) to help staff reconcile against the photo.`,
+canned: `MODE-SPECIFIC (CANNED / WET)
+- Apply BASE STEP 3 depth rule; canned mode adds grid multiplication when stacks are uniform.
+- PRODUCT ID: Read the main product line on the label band (e.g. ON-CARE, GASTROINTESTINAL BIOME, URINARY CARE c/d) and put it in product_name. Do not substitute a different line (e.g. do not write "Science Diet Adult" when the label says Prescription Diet On-Care). Different label colour bands or line names = separate rows even if brand is the same (e.g. Hill's).
+- Read the smallest legible text bands for flavour and variant; chicken vs lamb (or similar) must be separate line items whenever the text or consistent colour band differs.
 - Compare can height and diameter to neighbours and to label grams/oz/ml. Do not merge different sizes.
-- For depth: report a confident count for clearly visible front-row units. If a second row might be hidden, add a flag (e.g. "possible second row — depth not verified") rather than inflating the count; you may use Medium confidence when counting assumes depth.`,
-  pills: `MODE-SPECIFIC (PILLS / SMALL ITEMS)
-- Count discrete visible units in the pill tray (or loose layout). Count each pill you can reasonably see as one unit; do not infer pills hidden under others or outside the frame.
-- If a bottle or box is in frame, you may describe it in a separate line item, but the tray line item's "count" must reflect only the tray — never substitute the container's printed quantity (e.g. "30 tablets") for a manual tray count.
-- Use conservative confidence when pills overlap, glare, or blur; flag occlusion and suggest manual verification when uncertain.`,
+- Partial columns at the frame edge: output a separate row only if enough label text is visible to name the SKU; otherwise flag "partial stack at edge".
+- GRID COUNTING (per uniform column/stack of identical cans):
+  1. Identify each visually distinct column (same label colour band / same legible product line).
+  2. Height (H): count cans in the front-facing vertical stack for that column (top to bottom).
+  3. Depth (D): count how many full layers exist behind the front row for that column. Evidence: partially visible cans, aligned pull-tabs/lids, repeated label bands at the same height, shadows between layers. Do not require full label visibility on rear cans if lids/edges align with the front stack.
+  4. Total: count = H × D for uniform rectangular stacks.
+  5. Description (required): state the arithmetic (e.g. "5 high × 4 deep = 20") and position (e.g. "left column", "center stack").
+  6. Confidence: High when H and D are both clearly readable; Medium if one dimension is inferred from consistent partial evidence; Low + flag when the stack is irregular.
+  7. Irregular stacks: if layers differ in height or depth, or SKUs are mixed in one column, do not use H × D — count layer-by-layer or flag for manual review.`,
+pills: `MODE-SPECIFIC (PILLS / SMALL ITEMS)
+- Output one line item per distinct pill/tablet type. Do not create separate line items for the container and the contents — they are one entry.
+- Product identification: read brand, name, dosage, and strength from the bottle, box, or blister pack label. Use this for product_name and description only.
+- Count: manually count only the discrete units you can actually see (loose pills, blister cavities, tray slots). Never substitute printed packaging quantities (e.g. "30 tablets", "100 capsules") for a manual count — ignore that text entirely when determining count.
+- If pills overlap, are obscured, or partially out of frame: count only what is confidently visible, set confidence to Medium or Low, and flag for manual verification.`,
 }
 
 const MODE_USER_LINE: Record<ScanMode, string> = {
@@ -67,13 +83,13 @@ const MODE_USER_LINE: Record<ScanMode, string> = {
   dry_bags:
     'Scan mode: dry food bags — separate vertical tiers, pack weights, flavours, and life-stage (puppy/adult/senior) into distinct line items; do not merge stacked sizes.',
   canned:
-    'Scan mode: canned/wet food — read smallest flavour text; separate sizes and flavours; flag uncertain second-row depth instead of guessing.',
+    'Scan mode: canned/wet food — for each uniform can column, count height (H) and depth (D), set count = H × D, and put "H high × D deep = total" in description; read the exact Prescription Diet / product line from labels.',
   pills:
     'Scan mode: pills/small items — count only visible discrete units in the tray; do not use the bottle label quantity as the tray count.',
 }
 
 const MAX_TOKENS: Record<ScanMode, number> = {
-  general: 1000,
+  general: 2048,
   dry_bags: 2048,
   canned: 2048,
   pills: 2048,
