@@ -47,7 +47,7 @@ export async function POST(req: NextRequest) {
         },
         hypothesisId: 'A',
         timestamp: Date.now(),
-        runId: 'pre-fix',
+        runId: 'post-fix',
       }),
     }).catch(() => {})
   } catch { /* ignore */ }
@@ -91,7 +91,7 @@ export async function POST(req: NextRequest) {
         },
         hypothesisId: 'B',
         timestamp: Date.now(),
-        runId: 'pre-fix',
+        runId: 'post-fix',
       }),
     }).catch(() => {})
     // #endregion

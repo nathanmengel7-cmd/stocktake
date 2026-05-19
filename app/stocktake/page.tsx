@@ -56,17 +56,112 @@ function agentLog(
       data,
       hypothesisId,
       timestamp: Date.now(),
-      runId: 'pre-fix',
+      runId: 'post-fix',
     }),
   }).catch(() => {})
 }
 // #endregion
 
+const IMAGE_MAX_EDGE_PX = 2048
+/** Keep JPEG under ~3.5MB so base64 + JSON stays within typical serverless limits. */
+const IMAGE_MAX_BYTES = 3.5 * 1024 * 1024
+
+function errorMessageFromUnknown(e: unknown): string {
+  if (e instanceof Error) return e.message
+  if (e instanceof ProgressEvent) {
+    return 'Could not read image (file may be too large for this device). Try a smaller photo or retake at lower resolution.'
+  }
+  return String(e)
+}
+
+function isImageFile(file: File): boolean {
+  if (file.type.startsWith('image/')) return true
+  return /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(file.name)
+}
+
+/** Resize/compress phone photos so FileReader and the API proxy can handle them. */
+function prepareImageForUpload(file: File): Promise<File> {
+  if (file.size <= 1.25 * 1024 * 1024 && file.type === 'image/jpeg') {
+    return Promise.resolve(file)
+  }
+
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+
+    const finish = (err?: Error, out?: File) => {
+      URL.revokeObjectURL(url)
+      if (err) reject(err)
+      else if (out) resolve(out)
+    }
+
+    img.onerror = () => finish(new Error('Could not load image (unsupported or corrupt file)'))
+
+    img.onload = () => {
+      let w = img.naturalWidth
+      let h = img.naturalHeight
+      if (!w || !h) {
+        finish(new Error('Could not read image dimensions'))
+        return
+      }
+      const scale = Math.min(1, IMAGE_MAX_EDGE_PX / Math.max(w, h))
+      w = Math.max(1, Math.round(w * scale))
+      h = Math.max(1, Math.round(h * scale))
+
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        finish(new Error('Could not process image on this device'))
+        return
+      }
+      ctx.drawImage(img, 0, 0, w, h)
+
+      const baseName = file.name.replace(/\.[^.]+$/, '') || 'photo'
+
+      const encode = (quality: number) => {
+        canvas.toBlob(
+          blob => {
+            if (!blob) {
+              finish(new Error('Could not compress image'))
+              return
+            }
+            if (blob.size > IMAGE_MAX_BYTES && quality > 0.45) {
+              encode(quality - 0.12)
+              return
+            }
+            finish(undefined, new File([blob], `${baseName}.jpg`, { type: 'image/jpeg' }))
+          },
+          'image/jpeg',
+          quality,
+        )
+      }
+      encode(0.85)
+    }
+
+    img.src = url
+  })
+}
+
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
-    reader.onload = () => resolve((reader.result as string).split(',')[1])
-    reader.onerror = reject
+    reader.onload = () => {
+      const result = reader.result as string
+      const b64 = result.split(',')[1]
+      if (!b64) {
+        reject(new Error('Could not encode image'))
+        return
+      }
+      resolve(b64)
+    }
+    reader.onerror = () => {
+      reject(new Error(
+        reader.error?.message
+          || 'Could not read image (file may be too large for this device)',
+      ))
+    }
     reader.readAsDataURL(file)
   })
 }
@@ -164,7 +259,7 @@ export default function StocktakePage() {
     if (!files) return
     const newItems: QueueItem[] = []
     for (const file of Array.from(files)) {
-      if (!file.type.startsWith('image/')) continue
+      if (!isImageFile(file)) continue
       newItems.push({ id: `${Date.now()}-${Math.random()}`, file, url: URL.createObjectURL(file), status: 'pending' })
     }
     setQueue(prev => [...prev, ...newItems])
@@ -192,8 +287,17 @@ export default function StocktakePage() {
           fileType: qi.file.type || '(empty)',
         }, 'A')
         // #endregion
-        const b64 = await fileToBase64(qi.file)
-        const mime = qi.file.type || 'image/jpeg'
+        const prepared = await prepareImageForUpload(qi.file)
+        // #region agent log
+        agentLog('page.tsx:runAnalysis:prepared', 'image prepared', {
+          queueId: qi.id,
+          originalBytes: qi.file.size,
+          preparedBytes: prepared.size,
+          preparedType: prepared.type,
+        }, 'C')
+        // #endregion
+        const b64 = await fileToBase64(prepared)
+        const mime = 'image/jpeg'
         const { system, userText, max_tokens } = buildClaudeRequestParts(modeSnapshot)
         const requestBody = JSON.stringify({
           model: 'claude-sonnet-4-20250514',
@@ -291,7 +395,7 @@ export default function StocktakePage() {
           return { ...i, brand: b || 'unknown', size: sz, source: qi.file.name, queueId: qi.id } as StockItem
         })])
       } catch (e) {
-        const errMsg = e instanceof Error ? e.message : String(e)
+        const errMsg = errorMessageFromUnknown(e)
         console.error(e)
         // #region agent log
         agentLog('page.tsx:runAnalysis:catch', 'scan failed', {
