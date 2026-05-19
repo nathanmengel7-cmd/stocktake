@@ -37,6 +37,14 @@ interface QueueItem {
   status: QueueStatus
   /** Set when status is error (for UI + debug). */
   errorDetail?: string
+  errorDebug?: Record<string, string>
+}
+
+interface ScanErrorDialog {
+  queueId: string
+  fileName: string
+  message: string
+  details: Record<string, string>
 }
 
 // #region agent log
@@ -62,9 +70,15 @@ function agentLog(
 }
 // #endregion
 
-const IMAGE_MAX_EDGE_PX = 2048
+const IMAGE_MAX_EDGE_PX = 1600
 /** Keep JPEG under ~3.5MB so base64 + JSON stays within typical serverless limits. */
 const IMAGE_MAX_BYTES = 3.5 * 1024 * 1024
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`
+}
 
 function errorMessageFromUnknown(e: unknown): string {
   if (e instanceof Error) return e.message
@@ -79,69 +93,142 @@ function isImageFile(file: File): boolean {
   return /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(file.name)
 }
 
-/** Resize/compress phone photos so FileReader and the API proxy can handle them. */
-function prepareImageForUpload(file: File): Promise<File> {
-  if (file.size <= 1.25 * 1024 * 1024 && file.type === 'image/jpeg') {
-    return Promise.resolve(file)
-  }
+function canvasToJpegFile(canvas: HTMLCanvasElement, baseName: string): Promise<File> {
+  return new Promise((resolve, reject) => {
+    const encode = (quality: number) => {
+      canvas.toBlob(
+        blob => {
+          if (!blob) {
+            reject(new Error('Could not compress image to JPEG'))
+            return
+          }
+          if (blob.size > IMAGE_MAX_BYTES && quality > 0.4) {
+            encode(quality - 0.12)
+            return
+          }
+          resolve(new File([blob], `${baseName}.jpg`, { type: 'image/jpeg' }))
+        },
+        'image/jpeg',
+        quality,
+      )
+    }
+    encode(0.82)
+  })
+}
 
+function drawToCanvas(source: CanvasImageSource, srcW: number, srcH: number): Promise<HTMLCanvasElement> {
+  const max = Math.max(srcW, srcH)
+  const scale = Math.min(1, IMAGE_MAX_EDGE_PX / max)
+  const w = Math.max(1, Math.round(srcW * scale))
+  const h = Math.max(1, Math.round(srcH * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return Promise.reject(new Error('Canvas not available on this device'))
+  ctx.drawImage(source, 0, 0, w, h)
+  return Promise.resolve(canvas)
+}
+
+async function prepareViaCreateImageBitmap(file: File, baseName: string): Promise<File> {
+  if (typeof createImageBitmap !== 'function') {
+    throw new Error('createImageBitmap not supported')
+  }
+  let bitmap: ImageBitmap
+  try {
+    bitmap = await createImageBitmap(file, {
+      resizeWidth: IMAGE_MAX_EDGE_PX,
+      resizeQuality: 'medium',
+    })
+  } catch {
+    bitmap = await createImageBitmap(file)
+  }
+  try {
+    const canvas = await drawToCanvas(bitmap, bitmap.width, bitmap.height)
+    return canvasToJpegFile(canvas, baseName)
+  } finally {
+    bitmap.close()
+  }
+}
+
+function prepareViaImageElement(file: File, baseName: string): Promise<File> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file)
     const img = new Image()
-
     const finish = (err?: Error, out?: File) => {
       URL.revokeObjectURL(url)
       if (err) reject(err)
       else if (out) resolve(out)
     }
-
-    img.onerror = () => finish(new Error('Could not load image (unsupported or corrupt file)'))
-
+    img.onerror = () => finish(new Error('Image element could not decode file'))
     img.onload = () => {
-      let w = img.naturalWidth
-      let h = img.naturalHeight
+      const w = img.naturalWidth
+      const h = img.naturalHeight
       if (!w || !h) {
         finish(new Error('Could not read image dimensions'))
         return
       }
-      const scale = Math.min(1, IMAGE_MAX_EDGE_PX / Math.max(w, h))
-      w = Math.max(1, Math.round(w * scale))
-      h = Math.max(1, Math.round(h * scale))
-
-      const canvas = document.createElement('canvas')
-      canvas.width = w
-      canvas.height = h
-      const ctx = canvas.getContext('2d')
-      if (!ctx) {
-        finish(new Error('Could not process image on this device'))
-        return
-      }
-      ctx.drawImage(img, 0, 0, w, h)
-
-      const baseName = file.name.replace(/\.[^.]+$/, '') || 'photo'
-
-      const encode = (quality: number) => {
-        canvas.toBlob(
-          blob => {
-            if (!blob) {
-              finish(new Error('Could not compress image'))
-              return
-            }
-            if (blob.size > IMAGE_MAX_BYTES && quality > 0.45) {
-              encode(quality - 0.12)
-              return
-            }
-            finish(undefined, new File([blob], `${baseName}.jpg`, { type: 'image/jpeg' }))
-          },
-          'image/jpeg',
-          quality,
-        )
-      }
-      encode(0.85)
+      drawToCanvas(img, w, h)
+        .then(canvas => canvasToJpegFile(canvas, baseName))
+        .then(out => finish(undefined, out))
+        .catch(err => finish(err instanceof Error ? err : new Error(String(err))))
     }
-
     img.src = url
   })
+}
+
+/** Resize/compress phone photos so FileReader and the API proxy can handle them. */
+async function prepareImageForUpload(file: File): Promise<File> {
+  if (file.size <= 1.25 * 1024 * 1024 && file.type === 'image/jpeg') {
+    return file
+  }
+
+  const baseName = file.name.replace(/\.[^.]+$/, '') || 'photo'
+  const heicHint =
+    /\.heic|\.heif/i.test(file.name) || /heic|heif/i.test(file.type)
+      ? ' Tip: iPhone → Settings → Camera → Formats → Most Compatible (JPEG).'
+      : ''
+
+  const attempts: { name: string; run: () => Promise<File> }[] = [
+    { name: 'createImageBitmap (resize on decode)', run: () => prepareViaCreateImageBitmap(file, baseName) },
+    { name: 'image element', run: () => prepareViaImageElement(file, baseName) },
+  ]
+
+  const failures: string[] = []
+  for (const attempt of attempts) {
+    try {
+      return await attempt.run()
+    } catch (e) {
+      const msg = errorMessageFromUnknown(e)
+      failures.push(`${attempt.name}: ${msg}`)
+      // #region agent log
+      agentLog('page.tsx:prepareImageForUpload', 'attempt failed', {
+        attempt: attempt.name,
+        fileSize: file.size,
+        fileType: file.type || '(empty)',
+        msg,
+      }, 'C')
+      // #endregion
+    }
+  }
+
+  throw new Error(
+    `Could not prepare image (${formatBytes(file.size)}, type: ${file.type || 'unknown'}). ` +
+      `${failures.join(' · ')}.${heicHint}`,
+  )
+}
+
+function buildScanErrorDebug(file: File, extra?: Record<string, string>): Record<string, string> {
+  return {
+    'File name': file.name,
+    'File size': formatBytes(file.size),
+    'File type': file.type || '(empty)',
+    'Max edge after resize': `${IMAGE_MAX_EDGE_PX}px`,
+    ...(typeof navigator !== 'undefined'
+      ? { Browser: navigator.userAgent.slice(0, 160) }
+      : {}),
+    ...extra,
+  }
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -210,26 +297,40 @@ export default function StocktakePage() {
   const [running, setRunning] = useState(false)
   const [drag, setDrag] = useState(false)
   const [lightbox, setLightbox] = useState<LightboxState>(null)
+  const [scanError, setScanError] = useState<ScanErrorDialog | null>(null)
 
   const closeLightbox = useCallback(() => setLightbox(null), [])
+  const closeScanError = useCallback(() => setScanError(null), [])
+
+  const openScanErrorForQueueItem = useCallback((q: QueueItem) => {
+    if (!q.errorDetail) return
+    setScanError({
+      queueId: q.id,
+      fileName: q.file.name,
+      message: q.errorDetail,
+      details: q.errorDebug ?? buildScanErrorDebug(q.file),
+    })
+  }, [])
 
   useEffect(() => {
-    if (!lightbox) return
+    if (!lightbox && !scanError) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeLightbox()
+      if (e.key !== 'Escape') return
+      if (scanError) closeScanError()
+      else closeLightbox()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [lightbox, closeLightbox])
+  }, [lightbox, scanError, closeLightbox, closeScanError])
 
   useEffect(() => {
-    if (!lightbox) return
+    if (!lightbox && !scanError) return
     const prev = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
       document.body.style.overflow = prev
     }
-  }, [lightbox])
+  }, [lightbox, scanError])
 
   const [scanMode, setScanMode] = useState<ScanMode>('general')
 
@@ -396,15 +497,28 @@ export default function StocktakePage() {
         })])
       } catch (e) {
         const errMsg = errorMessageFromUnknown(e)
+        const errorDebug = buildScanErrorDebug(qi.file, {
+          Stage: 'analyse',
+          'Error type': e instanceof Error ? e.name : typeof e,
+        })
         console.error(e)
         // #region agent log
         agentLog('page.tsx:runAnalysis:catch', 'scan failed', {
           queueId: qi.id,
           errMsg,
           errName: e instanceof Error ? e.name : 'unknown',
+          ...errorDebug,
         }, 'ALL')
         // #endregion
-        setQueue(prev => prev.map(q => q.id === qi.id ? { ...q, status: 'error', errorDetail: errMsg } : q))
+        setQueue(prev => prev.map(q => q.id === qi.id
+          ? { ...q, status: 'error', errorDetail: errMsg, errorDebug }
+          : q))
+        setScanError({
+          queueId: qi.id,
+          fileName: qi.file.name,
+          message: errMsg,
+          details: errorDebug,
+        })
       }
     }
 
@@ -663,7 +777,7 @@ export default function StocktakePage() {
         >
           <div className="text-4xl mb-3">📷</div>
           <p className="text-sm text-gray-500">Click to upload shelf photos, or drag and drop</p>
-          <p className="text-xs text-gray-400 mt-1">PNG, JPG, WEBP — multiple files supported</p>
+          <p className="text-xs text-gray-400 mt-1">PNG, JPG, WEBP — large photos are resized automatically before analyse</p>
         </div>
         <input id="file-input" type="file" accept="image/*" multiple className="hidden" onChange={e => addFiles(e.target.files)} />
 
@@ -686,12 +800,19 @@ export default function StocktakePage() {
                     <img src={q.url} alt="" className="w-9 h-9 rounded object-cover pointer-events-none" />
                   </button>
                   <span className="text-sm text-gray-700 flex-1 truncate">{q.file.name}</span>
-                  <span
-                    className={`text-xs px-2 py-0.5 rounded-full max-w-[45%] truncate ${statusStyle[q.status]}`}
-                    title={q.errorDetail || statusLabel[q.status]}
-                  >
-                    {q.status === 'error' && q.errorDetail ? q.errorDetail : statusLabel[q.status]}
-                  </span>
+                  {q.status === 'error' ? (
+                    <button
+                      type="button"
+                      onClick={() => openScanErrorForQueueItem(q)}
+                      className={`text-xs px-2 py-1 rounded-full shrink-0 max-w-[50%] text-left underline decoration-dotted ${statusStyle.error}`}
+                    >
+                      Error — tap for details
+                    </button>
+                  ) : (
+                    <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${statusStyle[q.status]}`}>
+                      {statusLabel[q.status]}
+                    </span>
+                  )}
                   <button
                     type="button"
                     disabled={q.status === 'scanning' || running}
@@ -1010,6 +1131,61 @@ export default function StocktakePage() {
         {sessions.length === 0 && queue.length === 0 && (
           <div className="text-center py-16 text-gray-300 text-sm">
             Upload photos and click analyse to begin
+          </div>
+        )}
+
+        {scanError && (
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="scan-error-title"
+            className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/60 p-3 sm:p-4"
+            onClick={closeScanError}
+          >
+            <div
+              className="relative flex max-h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-xl bg-white shadow-xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-3 border-b border-red-100 bg-red-50 px-4 py-3">
+                <div>
+                  <h3 id="scan-error-title" className="text-sm font-semibold text-red-900">
+                    Analyse failed
+                  </h3>
+                  <p className="text-xs text-red-700 mt-0.5 break-all">{scanError.fileName}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeScanError}
+                  className="flex-shrink-0 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm text-red-800"
+                >
+                  Close
+                </button>
+              </div>
+              <div className="overflow-y-auto px-4 py-3 space-y-3">
+                <p className="text-sm text-gray-900 whitespace-pre-wrap break-words">{scanError.message}</p>
+                <div>
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1.5">Debug details</p>
+                  <dl className="text-xs bg-gray-50 border border-gray-100 rounded-lg p-3 space-y-2">
+                    {Object.entries(scanError.details).map(([k, v]) => (
+                      <div key={k}>
+                        <dt className="text-gray-500">{k}</dt>
+                        <dd className="text-gray-900 break-all mt-0.5">{v}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const text = `${scanError.message}\n\n${Object.entries(scanError.details).map(([k, v]) => `${k}: ${v}`).join('\n')}`
+                    void navigator.clipboard?.writeText(text)
+                  }}
+                  className="w-full text-sm border border-gray-200 rounded-lg py-2 text-gray-700 hover:bg-gray-50"
+                >
+                  Copy error details
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
