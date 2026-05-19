@@ -212,10 +212,91 @@ async function prepareImageForUpload(file: File): Promise<File> {
     }
   }
 
-  throw new Error(
-    `Could not prepare image (${formatBytes(file.size)}, type: ${file.type || 'unknown'}). ` +
+  const err = new Error(
+    `Could not prepare image on this device (${formatBytes(file.size)}, type: ${file.type || 'unknown'}). ` +
       `${failures.join(' · ')}.${heicHint}`,
   )
+  ;(err as Error & { clientPrepareFailed: true }).clientPrepareFailed = true
+  throw err
+}
+
+async function prepareImageViaServer(file: File): Promise<{
+  b64: string
+  mime: string
+  prepareDebug: Record<string, string>
+}> {
+  const fd = new FormData()
+  fd.append('file', file)
+  const res = await fetch('/api/resize-image', { method: 'POST', body: fd })
+  const raw = await res.text()
+  let data: Record<string, unknown>
+  try {
+    data = raw.trim() ? (JSON.parse(raw) as Record<string, unknown>) : {}
+  } catch {
+    throw new Error(`Resize API returned non-JSON (HTTP ${res.status})`)
+  }
+  if (!res.ok) {
+    const msg =
+      (typeof data.error === 'string' ? data.error : null) ||
+      (typeof data.detail === 'string' ? data.detail : null) ||
+      `Resize failed (HTTP ${res.status})`
+    throw new Error(msg)
+  }
+  const b64 = typeof data.base64 === 'string' ? data.base64 : ''
+  if (!b64) throw new Error('Resize API returned no image data')
+  const w = data.originalWidth as number | undefined
+  const h = data.originalHeight as number | undefined
+  return {
+    b64,
+    mime: typeof data.mediaType === 'string' ? data.mediaType : 'image/jpeg',
+    prepareDebug: {
+      'Resize path': 'server',
+      'Output size': formatBytes(Number(data.outputBytes) || 0),
+      'Original dimensions': w && h ? `${w}×${h}` : 'unknown',
+    },
+  }
+}
+
+/** Browser resize first; fall back to server when mobile cannot decode huge JPEGs. */
+async function getImageBase64ForAnalysis(file: File): Promise<{
+  b64: string
+  mime: string
+  prepareDebug: Record<string, string>
+}> {
+  try {
+    const prepared = await prepareImageForUpload(file)
+    const b64 = await fileToBase64(prepared)
+    // #region agent log
+    agentLog('page.tsx:getImageBase64', 'client prepare ok', {
+      originalBytes: file.size,
+      preparedBytes: prepared.size,
+    }, 'C')
+    // #endregion
+    return {
+      b64,
+      mime: 'image/jpeg',
+      prepareDebug: {
+        'Resize path': 'browser',
+        'Prepared size': formatBytes(prepared.size),
+      },
+    }
+  } catch (clientErr) {
+    const clientMsg = errorMessageFromUnknown(clientErr)
+    // #region agent log
+    agentLog('page.tsx:getImageBase64', 'client failed, trying server', {
+      fileSize: file.size,
+      clientMsg,
+    }, 'C')
+    // #endregion
+    const server = await prepareImageViaServer(file)
+    return {
+      ...server,
+      prepareDebug: {
+        ...server.prepareDebug,
+        'Browser prepare failed': clientMsg.slice(0, 240),
+      },
+    }
+  }
 }
 
 function buildScanErrorDebug(file: File, extra?: Record<string, string>): Record<string, string> {
@@ -388,17 +469,15 @@ export default function StocktakePage() {
           fileType: qi.file.type || '(empty)',
         }, 'A')
         // #endregion
-        const prepared = await prepareImageForUpload(qi.file)
+        const { b64, mime, prepareDebug } = await getImageBase64ForAnalysis(qi.file)
         // #region agent log
-        agentLog('page.tsx:runAnalysis:prepared', 'image prepared', {
+        agentLog('page.tsx:runAnalysis:prepared', 'image ready for api', {
           queueId: qi.id,
           originalBytes: qi.file.size,
-          preparedBytes: prepared.size,
-          preparedType: prepared.type,
+          b64Len: b64.length,
+          ...prepareDebug,
         }, 'C')
         // #endregion
-        const b64 = await fileToBase64(prepared)
-        const mime = 'image/jpeg'
         const { system, userText, max_tokens } = buildClaudeRequestParts(modeSnapshot)
         const requestBody = JSON.stringify({
           model: 'claude-sonnet-4-20250514',
