@@ -35,7 +35,32 @@ interface QueueItem {
   file: File
   url: string
   status: QueueStatus
+  /** Set when status is error (for UI + debug). */
+  errorDetail?: string
 }
+
+// #region agent log
+function agentLog(
+  location: string,
+  message: string,
+  data: Record<string, unknown>,
+  hypothesisId: string,
+) {
+  fetch('http://127.0.0.1:7388/ingest/460dcf57-734f-43ed-8370-64f28b2ba6fb', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '730a3c' },
+    body: JSON.stringify({
+      sessionId: '730a3c',
+      location,
+      message,
+      data,
+      hypothesisId,
+      timestamp: Date.now(),
+      runId: 'pre-fix',
+    }),
+  }).catch(() => {})
+}
+// #endregion
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -157,35 +182,68 @@ export default function StocktakePage() {
     const modeSnapshot = scanMode
 
     for (const qi of pending) {
-      setQueue(prev => prev.map(q => q.id === qi.id ? { ...q, status: 'scanning' } : q))
+      setQueue(prev => prev.map(q => q.id === qi.id ? { ...q, status: 'scanning', errorDetail: undefined } : q))
       try {
+        // #region agent log
+        agentLog('page.tsx:runAnalysis:start', 'scan start', {
+          queueId: qi.id,
+          fileName: qi.file.name,
+          fileSize: qi.file.size,
+          fileType: qi.file.type || '(empty)',
+        }, 'A')
+        // #endregion
         const b64 = await fileToBase64(qi.file)
         const mime = qi.file.type || 'image/jpeg'
         const { system, userText, max_tokens } = buildClaudeRequestParts(modeSnapshot)
+        const requestBody = JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens,
+          system,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: mime, data: b64 } },
+              { type: 'text', text: userText }
+            ]
+          }]
+        })
+        // #region agent log
+        agentLog('page.tsx:runAnalysis:pre-fetch', 'payload built', {
+          queueId: qi.id,
+          b64Len: b64.length,
+          payloadBytes: requestBody.length,
+          mime,
+        }, 'A')
+        // #endregion
 
         const res = await fetch('/api/claude', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens,
-            system,
-            messages: [{
-              role: 'user',
-              content: [
-                { type: 'image', source: { type: 'base64', media_type: mime, data: b64 } },
-                { type: 'text', text: userText }
-              ]
-            }]
-          })
+          body: requestBody,
         })
 
         const rawBody = await res.text()
+        // #region agent log
+        agentLog('page.tsx:runAnalysis:post-fetch', 'api response', {
+          queueId: qi.id,
+          httpStatus: res.status,
+          ok: res.ok,
+          rawBodyLen: rawBody.length,
+          bodyPreview: rawBody.slice(0, 280),
+        }, 'B')
+        // #endregion
 
         let data: Record<string, unknown>
         try {
           data = rawBody.trim() ? (JSON.parse(rawBody) as Record<string, unknown>) : {}
         } catch {
+          // #region agent log
+          agentLog('page.tsx:runAnalysis:json-parse-fail', 'non-json api body', {
+            queueId: qi.id,
+            httpStatus: res.status,
+            rawBodyLen: rawBody.length,
+          }, 'E')
+          // #endregion
           throw new Error(`/api/claude returned non-JSON (HTTP ${res.status}).`)
         }
 
@@ -195,12 +253,26 @@ export default function StocktakePage() {
             (typeof data.error === 'string' ? data.error : errObj?.message) ||
             (typeof data.message === 'string' ? data.message : null) ||
             `Stocktake API error (HTTP ${res.status})`
+          // #region agent log
+          agentLog('page.tsx:runAnalysis:api-error', 'api not ok', {
+            queueId: qi.id,
+            httpStatus: res.status,
+            msg,
+          }, 'B')
+          // #endregion
           throw new Error(msg)
         }
 
         const content = data.content as Array<{ type: string; text?: string }> | undefined
         const text = content?.find(b => b.type === 'text')?.text || ''
         const clean = text.replace(/```json|```/g, '').trim()
+        // #region agent log
+        agentLog('page.tsx:runAnalysis:pre-model-json', 'claude text received', {
+          queueId: qi.id,
+          textLen: clean.length,
+          textPreview: clean.slice(0, 120),
+        }, 'D')
+        // #endregion
         const parsed = JSON.parse(clean)
         const photoFlags = (parsed.flags || []).filter(Boolean) as string[]
 
@@ -219,8 +291,16 @@ export default function StocktakePage() {
           return { ...i, brand: b || 'unknown', size: sz, source: qi.file.name, queueId: qi.id } as StockItem
         })])
       } catch (e) {
+        const errMsg = e instanceof Error ? e.message : String(e)
         console.error(e)
-        setQueue(prev => prev.map(q => q.id === qi.id ? { ...q, status: 'error' } : q))
+        // #region agent log
+        agentLog('page.tsx:runAnalysis:catch', 'scan failed', {
+          queueId: qi.id,
+          errMsg,
+          errName: e instanceof Error ? e.name : 'unknown',
+        }, 'ALL')
+        // #endregion
+        setQueue(prev => prev.map(q => q.id === qi.id ? { ...q, status: 'error', errorDetail: errMsg } : q))
       }
     }
 
@@ -502,7 +582,12 @@ export default function StocktakePage() {
                     <img src={q.url} alt="" className="w-9 h-9 rounded object-cover pointer-events-none" />
                   </button>
                   <span className="text-sm text-gray-700 flex-1 truncate">{q.file.name}</span>
-                  <span className={`text-xs px-2 py-0.5 rounded-full ${statusStyle[q.status]}`}>{statusLabel[q.status]}</span>
+                  <span
+                    className={`text-xs px-2 py-0.5 rounded-full max-w-[45%] truncate ${statusStyle[q.status]}`}
+                    title={q.errorDetail || statusLabel[q.status]}
+                  >
+                    {q.status === 'error' && q.errorDetail ? q.errorDetail : statusLabel[q.status]}
+                  </span>
                   <button
                     type="button"
                     disabled={q.status === 'scanning' || running}
